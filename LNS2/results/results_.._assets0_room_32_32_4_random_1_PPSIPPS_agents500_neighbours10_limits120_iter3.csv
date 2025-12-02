@@ -1,0 +1,7 @@
+Start file: ../assets0/room-32-32-4-random-1.scen,
+iteration: 0, cost: 10376.687219637288, duration: 26.667155981063843, num_raplans: 48
+iteration: 1, cost: 10552.46896556783, duration: 34.39616394042969, num_raplans: 64
+iteration: 2, cost: 10584.392847122086, duration: 30.286917209625244, num_raplans: 55
+Instance summary: num_iteration:3, avg_cost: 10504.516344109068, avg_duration: 30.450079043706257, avg_replans: 55, std_duration: 3.867086415773593, success_ratio: 100.0%
+
+

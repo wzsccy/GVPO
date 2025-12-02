@@ -1,0 +1,59 @@
+# 代理集
+agents:
+-   name: 0
+    start: [29, 6]
+-   name: 1
+    start: [16, 7]
+#-   name: 2
+#    start: [17, 23]
+#-   name: 3
+#    start: [35, 24]
+#-   name: 4
+#    start: [45, 16]
+#-   name: 5
+#    start: [0, 20]
+#-   name: 6
+#    start: [41, 9]
+#-   name: 7
+#    start: [43, 23]
+#-   name: 8
+#    start: [5, 2]
+#-   name: 9
+#    start: [34, 12]
+# 任务集
+tasks:
+-   name: 0
+    release_time: 1
+    Loading: [9, 26]
+    Unloading: [25, 18]
+-   name: 1
+    release_time: 1
+    Loading: [ 24, 13 ]
+    Unloading: [7, 39]
+-   name: 2
+    release_time: 1
+    Loading: [27, 46]
+    Unloading: [ 6, 21]
+-   name: 3
+    release_time: 1
+    Loading: [ 1, 33 ]
+    Unloading: [ 35, 34]
+
+
+# 地图
+map:
+    dimensions: [50, 50]
+    obstacles:
+    - !!python/tuple [5, 3]
+#    - !!python/tuple [6, 4]
+#    - !!python/tuple [7, 5]
+#    - !!python/tuple [8, 6]
+#    - !!python/tuple [9, 7]
+#    - !!python/tuple [9, 3]
+#    - !!python/tuple [8, 4]
+#    - !!python/tuple [7, 5]
+#    - !!python/tuple [6, 6]
+#    - !!python/tuple [5, 7]
+
+
+

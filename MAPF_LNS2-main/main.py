@@ -1,0 +1,163 @@
+import time
+
+from loadscen import *
+from prioritizedPlanning import *
+from Utils import *
+from LNSUtil import *
+import heapq
+import argparse
+from ReplanCBSSIPPS import LNS2CBS
+from ReplanPPSIPPS import LNS2PP
+import glob
+import time as timer
+from timeout import timeout
+from statistics import stdev, mean
+
+SOLVER = "PPSIPPS"
+# SOLVER = "CBSSIPPS"
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Runs various MAPF algorithms')
+    parser.add_argument('--instance', type=str, default=["map/room-32-32-4.map"],
+                        help='The name of the instance file(s)')
+    parser.add_argument('--scens', nargs='+', default=["scen/room-32-32-4-even-1.scen"],
+                        help='The name of the instance file(s)')
+
+    parser.add_argument('--solver', type=str, default=SOLVER,
+                        help='The solver to use (one of: {CBSSIPPS, PPSIPPS}), defaults to ' + str(SOLVER))
+
+    parser.add_argument('--num_agents', type=int, default=300,
+                        help='Number of agents, defaults to 10')
+
+    parser.add_argument('--num_neighbour', type=int, default=10,
+                        help='number of neighbourhood, defaults to 5')
+    
+    parser.add_argument('--time_limit', type=int, default=60,
+                        help='time_limits for test, defaults to 1 min(60secs)')
+
+    parser.add_argument('--num_iteration', type=int, default=1,
+                        help='number of times to run solver for each instance')
+    
+    args = parser.parse_args()
+
+
+    @timeout(args.time_limit)
+    def run_single_iteartion():
+
+        print("***Import an instance***")
+        print("1111",file)
+        instanceMap, instanceStarts, instanceGoals = loadScen(file, args.num_agents)
+        print(instanceMap)
+
+
+        map_width = len(instanceMap[0])
+        map_height = len(instanceMap)
+
+
+        startTime = time.time()
+        if args.solver == "PPSIPPS":
+            print("***Run LNS2 PP with SIPPS***")
+            print("running file: ", file)
+            print(numNeighbour,map_width,map_height,instanceMap,instanceStarts,instanceGoals)
+            instanceStarts, instanceGoals = (
+            [(14, 21), (0, 9), (2, 14), (28, 31), (26, 26), (11, 6), (24, 23), (21, 14), (25, 6), (17, 13), (15, 31),
+             (14, 30)],
+            [(16, 27), (4, 14), (18, 21), (14, 19), (21, 19), (14, 9), (19, 7), (7, 22), (22, 11), (15, 13), (18, 15),
+             (17, 3)])
+
+            paths, num_replan = LNS2PP(numNeighbour, map_width, map_height, instanceMap, instanceStarts, instanceGoals)
+
+
+        elif args.solver == "CBSSIPPS":
+            print("***Run LNS2 CBS with SIPPS***")
+            print("running file: ", file)
+            paths, num_replan = LNS2CBS(numNeighbour, map_width, map_height, instanceMap, instanceStarts, instanceGoals)
+
+        else:
+            raise RuntimeError("Unknown solver!")
+        endTime = time.time()
+        
+        duration = endTime - startTime
+        print("时间",duration)
+        # print(paths)
+        cost = get_sum_of_cost(paths)
+        print("成本",cost)
+
+        return duration, cost, num_replan,paths
+
+    scenario = args.scens
+
+    for instance in scenario:
+        filename = instance
+        filename = filename.replace("/", "_").replace("-", "_").replace(".scen", "").replace("*", "")
+
+        # filename = filename.replace(".scen", '').replace("*")
+        result_file_name = "results/results_" + filename + "_" + args.solver + "_" + "agents" + str(args.num_agents) + "_" + "neighbours" + str(args.num_neighbour) + "_" + "limits" + str(args.time_limit) + "_" + "iter" + str(args.num_iteration) + ".csv"
+
+        # raise 'asdf'
+        result_file = open(result_file_name, "w", buffering=1)
+
+        numNeighbour = args.num_neighbour    
+        num_iteration = args.num_iteration
+
+
+        files = sorted(glob.glob(instance))
+        # print(files)
+        for file in files:
+
+            paths = None
+            is_exceeded = False
+            durations = []
+            costs = []
+            result_file.write("Start file: {},\n".format(file))
+            num_time_exceeded = 0
+            total_replans = 0
+            for i in range(num_iteration):
+                duration = 0
+                cost = 0
+                
+                try:
+                    # print(1111)
+                    duration, cost, num_replans,paths = run_single_iteartion()
+                    # print(paths)
+                    # print(cost)
+                    costs.append(cost)
+                    durations.append(duration)
+                    result_file.write("iteration: {}, cost: {}, duration: {}, num_raplans: {}\n".format(i, cost, duration, num_replans))
+                    total_replans += num_replans
+                except Exception as e:
+                    num_time_exceeded += 1
+                    is_exceeded = True
+                    result_file.write("iteration: {}, exceeded time Limit!!\n".format(i))
+                    print("e: ", e)
+
+            if len(durations) == 0:
+                avg_duration = 0
+                std_duration = 0
+                avg_cost = 0
+                success_ratio = 0
+                avg_replans = 0
+
+            else:
+                avg_duration = mean(durations) if len(durations) > 1 else durations[0]
+                std_duration = stdev(durations) if len(durations) > 1 else 0
+                avg_cost = mean(costs) if len(costs) > 1 else costs[0]
+                success_ratio = (num_iteration - num_time_exceeded) / num_iteration * 100
+                avg_replans = total_replans // (num_iteration - num_time_exceeded)
+            
+
+            result_file.write("Instance summary: num_iteration:{}, avg_cost: {}, avg_duration: {}, avg_replans: {}, std_duration: {}, success_ratio: {}%\n\n\n".format(num_iteration, avg_cost, avg_duration, avg_replans, std_duration, success_ratio))
+
+            print("cost:",costs)
+        result_file.close()
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,5 @@
+Start file: scen/empty-8-8-even-1.scen,
+iteration: 0, cost: 134.3086578651013, duration: 0.015516281127929688, num_raplans: 1
+Instance summary: num_iteration:1, avg_cost: 134.3086578651013, avg_duration: 0.015516281127929688, avg_replans: 1, std_duration: 0, success_ratio: 100.0%
+
+

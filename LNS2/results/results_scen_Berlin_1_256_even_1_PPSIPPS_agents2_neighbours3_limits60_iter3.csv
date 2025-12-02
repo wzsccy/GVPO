@@ -1,0 +1,7 @@
+Start file: scen/Berlin_1_256-even-1.scen,
+iteration: 0, cost: 78, duration: 269453400, num_raplans: 0
+iteration: 1, cost: 78, duration: 259294700, num_raplans: 0
+iteration: 2, cost: 78, duration: 260553600, num_raplans: 0
+Instance summary: num_iteration:3, avg_cost: 78, avg_duration: 263100566.66666666, avg_replans: 0, std_duration: 5537605.603808683, success_ratio: 100.0%
+
+

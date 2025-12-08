@@ -91,6 +91,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tasks", required=True, type=int, help="Number of pickup/dropoff tasks to load")
     parser.add_argument("--episodes", type=int, default=1, help="Benchmark repetitions per algorithm")
     parser.add_argument("--max-episodes", type=int, default=120, help="RL training steps (same for both algos)")
+    parser.add_argument(
+        "--train-time-budget-s",
+        type=float,
+        default=0.0,
+        help="Wall-clock training budget per allocator (seconds). 0 disables the budget.",
+    )
     parser.add_argument("--batch-size", type=int, default=192, help="Batch size for PPO-style replay")
     parser.add_argument("--generations", type=int, default=6, help="Population size for GRPO/GVPO sampling")
     parser.add_argument("--seed", type=int, default=0, help="Global random seed")
@@ -114,6 +120,18 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="Neighbourhood size passed to the LNS2 planner",
     )
+    parser.add_argument(
+        "--planner-eval-every",
+        type=int,
+        default=0,
+        help="Run the MAPF planner every N episodes (0 = only run after the final episode)",
+    )
+    parser.add_argument(
+        "--preset",
+        choices=["default", "hard"],
+        default="default",
+        help="Convenience preset overriding agents/tasks/max_episodes for harder regimes",
+    )
     return parser.parse_args()
 
 
@@ -130,7 +148,29 @@ def build_initial_plan(num_agents: int, num_tasks: int) -> Dict[str, List[str]]:
     return plan
 
 
-def build_optimize_funcs(num_agents: int, num_tasks: int) -> List[Callable]:
+def compute_single_agent_cost(agent_idx: int, tasks: List[str], agent_dict, task_dict) -> float:
+    current = agent_dict.get(agent_idx)
+    if current is None:
+        return 0.0
+    total = 0.0
+    for task_name in tasks:
+        task_idx = int(task_name[1:])
+        pickup, dropoff, _ = task_dict.get(task_idx, (current, current, 0))
+        total += manhattan(current, pickup)
+        total += manhattan(pickup, dropoff)
+        current = dropoff
+    return total
+
+
+def compute_agent_cost_map(plan, agent_dict, task_dict) -> Dict[str, float]:
+    cost_map = {}
+    for agent_name, tasks in plan.items():
+        agent_idx = int(agent_name[1:])
+        cost_map[agent_name] = compute_single_agent_cost(agent_idx, tasks, agent_dict, task_dict)
+    return cost_map
+
+
+def build_optimize_funcs(num_agents: int, num_tasks: int, agent_dict, task_dict) -> List[Callable]:
     def move_task(plan):
         mutated = copy.deepcopy(plan)
         src = f"a{random.randrange(num_agents)}"
@@ -152,7 +192,54 @@ def build_optimize_funcs(num_agents: int, num_tasks: int) -> List[Callable]:
             mutated[agent_a][i], mutated[agent_b][j] = mutated[agent_b][j], mutated[agent_a][i]
         return mutated
 
-    return [move_task, swap_tasks]
+    def reinsert_block(plan):
+        mutated = copy.deepcopy(plan)
+        donors = [agent for agent, tasks in mutated.items() if tasks]
+        if not donors:
+            return mutated
+        src = random.choice(donors)
+        src_tasks = mutated[src]
+        block_len = random.randint(1, min(3, len(src_tasks)))
+        start_idx = random.randrange(0, len(src_tasks) - block_len + 1)
+        block = src_tasks[start_idx : start_idx + block_len]
+        del src_tasks[start_idx : start_idx + block_len]
+        dst = random.choice(list(mutated.keys()))
+        insert_idx = random.randrange(len(mutated[dst]) + 1)
+        for offset, task in enumerate(block):
+            mutated[dst].insert(insert_idx + offset, task)
+        return mutated
+
+    def two_opt_within_agent(plan):
+        mutated = copy.deepcopy(plan)
+        candidates = [agent for agent, tasks in mutated.items() if len(tasks) >= 2]
+        if not candidates:
+            return mutated
+        agent_name = random.choice(candidates)
+        tasks = mutated[agent_name]
+        i, j = sorted(random.sample(range(len(tasks)), 2))
+        before_cost = compute_single_agent_cost(int(agent_name[1:]), tasks, agent_dict, task_dict)
+        new_order = tasks[:i] + list(reversed(tasks[i : j + 1])) + tasks[j + 1 :]
+        after_cost = compute_single_agent_cost(int(agent_name[1:]), new_order, agent_dict, task_dict)
+        if after_cost < before_cost:
+            mutated[agent_name] = new_order
+        return mutated
+
+    def balance_heavy_to_light(plan):
+        mutated = copy.deepcopy(plan)
+        cost_map = compute_agent_cost_map(mutated, agent_dict, task_dict)
+        if not cost_map:
+            return mutated
+        heavy = max(cost_map.items(), key=lambda kv: kv[1])[0]
+        light = min(cost_map.items(), key=lambda kv: kv[1])[0]
+        if heavy == light or not mutated[heavy]:
+            return mutated
+        task_idx = random.randrange(len(mutated[heavy]))
+        task = mutated[heavy].pop(task_idx)
+        insert_idx = random.randrange(len(mutated[light]) + 1)
+        mutated[light].insert(insert_idx, task)
+        return mutated
+
+    return [move_task, swap_tasks, reinsert_block, two_opt_within_agent, balance_heavy_to_light]
 
 
 def manhattan(a: Tuple[int, int], b: Tuple[int, int]) -> int:
@@ -232,21 +319,33 @@ def load_environment(args: argparse.Namespace) -> Environment:
     if len(task_dict) < args.tasks:
         raise ValueError(f"Scenario only provided {len(task_dict)} tasks (< {args.tasks})")
 
+    agent_map = {int(k): v for k, v in agent_dict.items()}
+    task_map = {int(k): v for k, v in task_dict.items()}
     env = Environment(
         map_path=args.map,
         scen_path=args.scenario,
         grid=grid,
         starts=starts,
         goals=goals,
-        agent_dict={int(k): v for k, v in agent_dict.items()},
-        task_dict={int(k): v for k, v in task_dict.items()},
+        agent_dict=agent_map,
+        task_dict=task_map,
         num_agents=args.agents,
         num_tasks=args.tasks,
         init_plan=build_initial_plan(args.agents, args.tasks),
-        optimize_funcs=build_optimize_funcs(args.agents, args.tasks),
-        reward_fn=build_reward_fn(agent_dict, task_dict),
+        optimize_funcs=build_optimize_funcs(args.agents, args.tasks, agent_map, task_map),
+        reward_fn=build_reward_fn(agent_map, task_map),
     )
     return env
+
+
+def should_evaluate_planner(episode_idx: int, total_episodes: int, eval_every: int) -> bool:
+    if total_episodes <= 0:
+        return False
+    if eval_every <= 0:
+        return episode_idx == total_episodes - 1
+    if (episode_idx + 1) % eval_every == 0:
+        return True
+    return episode_idx == total_episodes - 1
 
 
 # --------------------------------------------------------------------------- #
@@ -273,6 +372,7 @@ def run_allocator(
         planner_type=shared_hparams["planner_type"],
         planner_kwargs=shared_hparams["planner_kwargs"],
     )
+    allocator.set_train_time_budget(shared_hparams.get("train_time_budget_s"))
     start = time.time()
     plan, best_cost = allocator.train(copy.deepcopy(env.init_plan))
     runtime = time.time() - start
@@ -290,14 +390,14 @@ def run_allocator(
     return plan, best_cost, runtime, planner_result
 
 
-def summarize_plan(plan, env, best_cost, inference_time) -> EpisodeResult:
+def summarize_plan(plan, env, evaluated_cost, inference_time) -> EpisodeResult:
     success = compute_success(plan, env.num_tasks)
     agent_costs = compute_agent_costs(plan, env.agent_dict, env.task_dict)
     avg_makespan = float(np.mean(agent_costs)) if agent_costs else 0.0
     return EpisodeResult(
         success_rate=success,
         avg_makespan=avg_makespan,
-        best_cost=float(best_cost),
+        best_cost=float(evaluated_cost),
         inference_time=float(inference_time),
     )
 
@@ -309,13 +409,17 @@ def run_episode(
     episode_idx: int,
     total_episodes: int,
     base_seed: int,
+    should_eval_planner: bool,
 ) -> EpisodeResult:
     episode_seed = base_seed + episode_idx
     seed_everything(episode_seed)
     logger.info("[%s][Episode %d/%d] Seed=%d", algo_name.upper(), episode_idx + 1, total_episodes, episode_seed)
-    planner_request = build_planner_request(env, shared_hparams["planner_time_limit_ms"], episode_seed)
-    plan, best_cost, runtime, planner_result = run_allocator(algo_name, env, shared_hparams, planner_request)
-    result = summarize_plan(plan, env, best_cost, runtime)
+    planner_request = None
+    if should_eval_planner:
+        planner_request = build_planner_request(env, shared_hparams["planner_time_limit_ms"], episode_seed)
+    plan, reported_cost, runtime, planner_result = run_allocator(algo_name, env, shared_hparams, planner_request)
+    manhattan_cost = compute_total_cost(plan, env.agent_dict, env.task_dict)
+    result = summarize_plan(plan, env, manhattan_cost, runtime)
     logger.info(
         "[%s][Episode %d/%d] success_rate=%.3f avg_makespan=%.1f best_cost=%.1f inference_time=%.2fs",
         algo_name.upper(),
@@ -325,6 +429,14 @@ def run_episode(
         result.avg_makespan,
         result.best_cost,
         result.inference_time,
+    )
+    logger.info(
+        "[%s][Episode %d/%d] allocator_reported_cost=%.1f manhattan_cost=%.1f",
+        algo_name.upper(),
+        episode_idx + 1,
+        total_episodes,
+        reported_cost,
+        manhattan_cost,
     )
     if planner_result and planner_result.cost is not None:
         logger.info(
@@ -350,7 +462,7 @@ def aggregate(results: List[EpisodeResult]) -> EpisodeResult:
 
 
 def print_table(grpo_stats: EpisodeResult, gvpo_stats: EpisodeResult):
-    header = f"{'metric':<20}{'GRPO':>12}{'GVPO':>12}{'delta (GVPO-GRPO)':>22}"
+    header = f"{'metric':<20}{'GRPO':>12}{'GVPO':>12}{'delta (GVPO-GRPO)':>22}{'rel %':>10}"
     print("\n" + header)
     print("-" * len(header))
     rows = [
@@ -361,7 +473,8 @@ def print_table(grpo_stats: EpisodeResult, gvpo_stats: EpisodeResult):
     ]
     for key, g_val, v_val in rows:
         delta = v_val - g_val
-        print(f"{key:<20}{g_val:>12.4f}{v_val:>12.4f}{delta:>22.4f}")
+        rel = 0.0 if g_val == 0 else (delta / abs(g_val)) * 100.0
+        print(f"{key:<20}{g_val:>12.4f}{v_val:>12.4f}{delta:>22.4f}{rel:>10.2f}")
 
 
 # --------------------------------------------------------------------------- #
@@ -371,6 +484,21 @@ def print_table(grpo_stats: EpisodeResult, gvpo_stats: EpisodeResult):
 
 def main():
     args = parse_args()
+    if args.preset == "hard":
+        hard_agents = max(args.agents, 320)
+        hard_tasks = max(args.tasks, 320)
+        hard_episodes = max(args.max_episodes, 200)
+        if (hard_agents, hard_tasks, hard_episodes) != (args.agents, args.tasks, args.max_episodes):
+            logger.info(
+                "Applying hard preset overrides: agents %d->%d tasks %d->%d max_episodes %d->%d",
+                args.agents,
+                hard_agents,
+                args.tasks,
+                hard_tasks,
+                args.max_episodes,
+                hard_episodes,
+            )
+        args.agents, args.tasks, args.max_episodes = hard_agents, hard_tasks, hard_episodes
     logger.info("Loading environment: map=%s scenario=%s", args.map, args.scenario)
     env = load_environment(args)
 
@@ -387,12 +515,18 @@ def main():
         "planner_type": planner_type,
         "planner_kwargs": planner_kwargs,
         "planner_time_limit_ms": args.planner_time_limit_ms,
+        "train_time_budget_s": max(0.0, float(args.train_time_budget_s)),
     }
 
     grpo_results, gvpo_results = [], []
     for episode_idx in range(args.episodes):
-        grpo_results.append(run_episode("grpo", env, shared_hparams, episode_idx, args.episodes, args.seed))
-        gvpo_results.append(run_episode("gvpo", env, shared_hparams, episode_idx, args.episodes, args.seed + 10_000))
+        eval_flag = should_evaluate_planner(episode_idx, args.episodes, args.planner_eval_every)
+        grpo_results.append(
+            run_episode("grpo", env, shared_hparams, episode_idx, args.episodes, args.seed, eval_flag)
+        )
+        gvpo_results.append(
+            run_episode("gvpo", env, shared_hparams, episode_idx, args.episodes, args.seed + 10_000, eval_flag)
+        )
 
     grpo_stats = aggregate(grpo_results)
     gvpo_stats = aggregate(gvpo_results)

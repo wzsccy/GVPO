@@ -46,11 +46,25 @@ def import_mapf_instance(filename):
 
 
 # replan untill collision free
-def replan(paths, numNeighbourhood, width, height, instanceMap, instanceStarts, instanceGoals, ALNS_weight, prevCP):
+def replan(
+    paths,
+    numNeighbourhood,
+    width,
+    height,
+    instanceMap,
+    instanceStarts,
+    instanceGoals,
+    ALNS_weight,
+    prevCP,
+    deadline=None,
+):
     # select a neighbourhood construction method
 
     # 0: collision, 1: failure, 2: random
     neighbourhood_kind = ALNS(ALNS_weight)
+
+    if deadline is not None and timer.perf_counter() >= deadline:
+        raise TimeoutError("LNS2 replan exceeded time budget before neighbourhood selection")
 
     neighbourhood = []
     if neighbourhood_kind == 0:
@@ -72,8 +86,13 @@ def replan(paths, numNeighbourhood, width, height, instanceMap, instanceStarts, 
         neighbourhoodStarts.append(instanceStarts[neighbourhood[i]])
         neighbourhoodGoals.append(instanceGoals[neighbourhood[i]])
 
+    if deadline is not None and timer.perf_counter() >= deadline:
+        raise TimeoutError("LNS2 replan exceeded time budget before CBS solve")
+
     cbs = CBSSolver(instanceMap, neighbourhoodStarts, neighbourhoodGoals, paths, neighbourhood)
     newPaths = cbs.find_solution(False)
+    if deadline is not None and timer.perf_counter() >= deadline:
+        raise TimeoutError("LNS2 replan exceeded time budget during CBS solve")
 
     #construct new paths solution and update variables
     newPathsSolution = copy.copy(paths)
@@ -91,9 +110,18 @@ def replan(paths, numNeighbourhood, width, height, instanceMap, instanceStarts, 
     return paths, prevCP
 
 
-def LNS2CBS(numNeighbourhood, width, height, instanceMap, instanceStarts, instanceGoals):
+def LNS2CBS(numNeighbourhood, width, height, instanceMap, instanceStarts, instanceGoals, time_limit_s=None):
+    time_budget = None if time_limit_s is None else max(0.0, float(time_limit_s))
+    deadline = None if time_budget is None else timer.perf_counter() + time_budget
+
+    def _ensure_time_budget():
+        if deadline is not None and timer.perf_counter() >= deadline:
+            raise TimeoutError("LNS2CBS exceeded time budget")
+
+    _ensure_time_budget()
     paths = list(range(len(instanceGoals)))
     neighbourhood, newPaths = prioritized_planning([], list(range(len(instanceGoals))), instanceMap, instanceStarts, instanceGoals)
+    _ensure_time_budget()
     for i in range(len(neighbourhood)):
         paths[neighbourhood[i]] = newPaths[i]
 
@@ -107,7 +135,19 @@ def LNS2CBS(numNeighbourhood, width, height, instanceMap, instanceStarts, instan
 
     replan_count = 0
     while numCp != 0:
-        paths, numCp = replan(paths, numNeighbourhood, width, height, instanceMap, instanceStarts, instanceGoals, ALNS_weight, numCp)
+        _ensure_time_budget()
+        paths, numCp = replan(
+            paths,
+            numNeighbourhood,
+            width,
+            height,
+            instanceMap,
+            instanceStarts,
+            instanceGoals,
+            ALNS_weight,
+            numCp,
+            deadline,
+        )
         replan_count += 1
 
     return paths, replan_count

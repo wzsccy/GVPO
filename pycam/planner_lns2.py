@@ -60,6 +60,9 @@ class LNS2Planner(BasePlanner):
         goals_xy = goals_xy[:num_agents]
 
         start_time = request.effective_start_time()
+        time_limit_s = None
+        if request.time_limit_ms is not None:
+            time_limit_s = max(0.0, float(request.time_limit_ms) / 1000.0)
         try:
             paths, num_replans = LNS2CBS(
                 self.num_neighbours,
@@ -68,7 +71,15 @@ class LNS2Planner(BasePlanner):
                 instance_map,
                 starts_xy,
                 goals_xy,
+                time_limit_s=time_limit_s,
             )
+        except TimeoutError:
+            runtime = time.time() - start_time
+            meta = {"planner": self.name, "status": "timeout"}
+            logger.warning(
+                "LNS2 planner exceeded wall-clock budget (%.2fs)", time_limit_s or 0.0
+            )
+            return PlannerResult(solution=None, cost=None, runtime_s=runtime, meta=meta)
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.exception("LNS2 planner raised an exception: %s", exc)
             return PlannerResult(solution=None, cost=None, runtime_s=0.0, meta={"planner": self.name, "error": str(exc)})

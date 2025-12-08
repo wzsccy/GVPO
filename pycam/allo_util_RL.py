@@ -2,7 +2,10 @@ import heapq
 import math
 import random
 import copy
+import time
+import multiprocessing as mp
 from collections import deque, defaultdict
+from queue import Empty as QueueEmpty
 from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
@@ -2512,8 +2515,16 @@ class GRPOAgent:
         current_cost = self.get_cost(current_P)
         best_cost = current_cost
         best_P = copy.deepcopy(current_P)
+        budget_s = getattr(self, "_time_budget_s", None)
+        if budget_s is not None and budget_s <= 0:
+            budget_s = None
+        start_time = time.perf_counter()
+        truncated = False
 
         for episode in range(1, self.max_episodes + 1):
+            if budget_s and episode > 1 and (time.perf_counter() - start_time) >= budget_s:
+                truncated = True
+                break
             state_vec = self.state_to_vector(current_P, current_cost, task_features, agent_features)
             state_tensor = torch.from_numpy(state_vec).unsqueeze(0).float().to(self.device)
             state_batch = state_tensor.repeat(self.G, 1)
@@ -2565,6 +2576,10 @@ class GRPOAgent:
             if episode % 50 == 0:
                 self.beta *= self.beta_decay
                 print(f"[GRPO] Ep {episode}: cost={current_cost:.2f} best={best_cost:.2f} eps={self.eps:.3f} β={self.beta:.4f}")
+
+        if budget_s and truncated:
+            elapsed = time.perf_counter() - start_time
+            logger.info("[GRPO] Time budget reached after %.2fs (episodes=%d)", elapsed, episode - 1)
 
         # cleanup
         if torch.cuda.is_available():
@@ -2628,7 +2643,7 @@ class GVPOAgent(GRPOAgent, nn.Module):
         self.value_clip = float(value_clip)
         self.propagation_depth = max(0, int(propagation_depth))
         self.propagation_decay = float(propagation_decay)
-        self.width_smoothing = float(width_smoothing)
+        self.width_smoothing = max(0.92, float(width_smoothing))
 
         ratio = max(1.0 / max(1, self.n), min(1.0, float(max_width_ratio)))
         self.max_width = max(1, int(math.ceil(self.n * ratio)))
@@ -2640,15 +2655,19 @@ class GVPOAgent(GRPOAgent, nn.Module):
         self.max_episodes = int(max(1, math.ceil(self._base_max_episodes * self.gvpo_episode_ratio)))
         self.width_plateau_patience = max(15, int(0.25 * self.max_episodes))
         self._no_improve_steps = 0
+        self.width_restart_patience = max(30, int(0.35 * self.max_episodes))
+        self._last_best_update = 0
+        self._plateau_boost_steps = 0
         # keep a higher exploration floor on large maps
-        self.gvpo_min_explore = max(self.eps_min, 0.08)
+        self.gvpo_min_explore = max(self.eps_min, 0.1)
         self.eps_min = self.gvpo_min_explore
-        self.eps_decay = 1.0 - 0.5 * (1.0 - self.eps_decay)
+        self.eps_decay = 1.0 - 0.3 * (1.0 - self.eps_decay)
 
         self.state_norm = nn.LayerNorm(self.state_size, elementwise_affine=False).to(self.device) if self.feature_norm else None
 
         depth_weights = _build_depth_weights(self.propagation_depth, self.propagation_decay, torch.device(self.device))
         self.register_buffer("depth_weights", depth_weights, persistent=False)
+        self.gvpo_adv_clip = 2.0
 
         if self.direct_act_size > 0:
             idx = torch.arange(self.direct_act_size, dtype=torch.long, device=self.device)
@@ -2721,6 +2740,11 @@ class GVPOAgent(GRPOAgent, nn.Module):
     def _update_width(self, rewards: np.ndarray, episode: int, improved: bool) -> None:
         if rewards.size == 0 or self.max_width <= 1:
             return
+        if self._plateau_boost_steps > 0:
+            self._plateau_boost_steps -= 1
+            self.current_width = self.max_width
+            self._width_track = float(self.max_width)
+            return
         centered = rewards - rewards.mean()
         variance = float(np.mean(centered * centered))
         if not np.isfinite(variance):
@@ -2761,7 +2785,7 @@ class GVPOAgent(GRPOAgent, nn.Module):
         adv_tensor = adv_tensor - adv_tensor.mean()
         std = adv_tensor.std(unbiased=False).clamp_min(1e-6)
         adv_tensor = adv_tensor / std
-        adv_tensor = adv_tensor.clamp(-3.0, 3.0)
+        adv_tensor = adv_tensor.clamp(-self.gvpo_adv_clip, self.gvpo_adv_clip)
         return adv_tensor
 
     def _compute_gvpo_loss(
@@ -2788,8 +2812,16 @@ class GVPOAgent(GRPOAgent, nn.Module):
         current_cost = self.get_cost(current_P)
         best_cost = current_cost
         best_plan = copy.deepcopy(current_P)
+        budget_s = getattr(self, "_time_budget_s", None)
+        if budget_s is not None and budget_s <= 0:
+            budget_s = None
+        start_time = time.perf_counter()
+        truncated = False
 
         for episode in range(1, self.max_episodes + 1):
+            if budget_s and episode > 1 and (time.perf_counter() - start_time) >= budget_s:
+                truncated = True
+                break
             state_vec = self.state_to_vector(current_P, current_cost, task_features, agent_features)
             state_tensor = torch.from_numpy(state_vec).unsqueeze(0).float().to(self.device)
             if self.state_norm is not None:
@@ -2830,8 +2862,21 @@ class GVPOAgent(GRPOAgent, nn.Module):
                 best_cost = best_candidate_cost
                 best_plan = copy.deepcopy(new_plans[best_idx])
                 self._no_improve_steps = 0
+                self._last_best_update = episode
+                self._plateau_boost_steps = 0
             else:
                 self._no_improve_steps += 1
+                if self._last_best_update == 0:
+                    self._last_best_update = episode
+                stagnation = episode - self._last_best_update
+                if (
+                    self._plateau_boost_steps == 0
+                    and stagnation >= self.width_restart_patience
+                ):
+                    self._plateau_boost_steps = max(10, int(0.08 * self.max_episodes))
+                    self.current_width = self.max_width
+                    self._width_track = float(self.max_width)
+                    self.eps = max(self.gvpo_min_explore, self.eps)
 
             current_P = new_plans[best_idx]
             current_cost = best_candidate_cost if np.isfinite(best_candidate_cost) else current_cost
@@ -2844,6 +2889,9 @@ class GVPOAgent(GRPOAgent, nn.Module):
                 )
                 self.beta = max(1e-5, self.beta * self.beta_decay)
 
+        if budget_s and truncated:
+            elapsed = time.perf_counter() - start_time
+            logger.info("[GVPO] Time budget reached after %.2fs (episodes=%d)", elapsed, episode - 1)
         logger.info(
             f"[GVPO] final cost={current_cost:.2f} best={best_cost:.2f} "
             f"width={self.current_width} eps={self.eps:.3f}"
@@ -3013,6 +3061,34 @@ def _full_gvpo_test_pipeline(
         print("[WARN] GVPO benchmark best_cost is worse than GRPO.")
 
 
+_PLANNER_TIMEOUT_BUFFER_S = 1.0
+
+
+def _planner_worker_entrypoint(
+    planner_type: str,
+    planner_kwargs: Dict[str, Any],
+    request: PlannerRequest,
+    queue: mp.Queue,
+) -> None:
+    try:
+        planner = PlannerFactory.create(planner_type, **planner_kwargs)
+        result = planner.solve(request)
+        queue.put({"status": "ok", "result": result})
+    except Exception as exc:  # pragma: no cover - planner failures handled by caller
+        queue.put(
+            {
+                "status": "error",
+                "error_type": type(exc).__name__,
+                "error_msg": str(exc),
+            }
+        )
+
+
+def _planner_wall_timeout_s(time_limit_ms: Optional[int]) -> float:
+    base = max(0, time_limit_ms or 0) / 1000.0
+    return base + _PLANNER_TIMEOUT_BUFFER_S
+
+
 class RLAllocator:
     """
     Thin wrapper that exposes a unified interface for GRPO and GVPO policies.
@@ -3035,14 +3111,24 @@ class RLAllocator:
 
         planner_key = planner_type.lower()
         self.planner_type = planner_key
-        self.planner = PlannerFactory.create(planner_key, **(planner_kwargs or {}))
+        self._planner_kwargs = dict(planner_kwargs or {})
+        self.planner = PlannerFactory.create(planner_key, **self._planner_kwargs)
+        self._train_time_budget_s: Optional[float] = None
         logger.info(
             "RL Agent initialized using algorithm=%s planner=%s",
             self.algo_type,
             self.planner_type,
         )
 
+    def set_train_time_budget(self, budget_s: Optional[float]) -> None:
+        if budget_s is None or budget_s <= 0:
+            self._train_time_budget_s = None
+        else:
+            self._train_time_budget_s = float(budget_s)
+        setattr(self.policy, "_time_budget_s", self._train_time_budget_s)
+
     def train(self, *args, **kwargs):
+        setattr(self.policy, "_time_budget_s", self._train_time_budget_s)
         return self.policy.train(*args, **kwargs)
 
     def select_action(self, *args, **kwargs):
@@ -3072,4 +3158,68 @@ class RLAllocator:
     def solve_mapf(self, request: PlannerRequest) -> PlannerResult:
         if self.planner is None:
             raise RuntimeError("Planner backend is not configured.")
-        return self.planner.solve(request)
+        timeout_s = _planner_wall_timeout_s(request.time_limit_ms)
+        ctx = mp.get_context("spawn")
+        result_queue = ctx.Queue(maxsize=1)
+        process = ctx.Process(
+            target=_planner_worker_entrypoint,
+            args=(self.planner_type, self._planner_kwargs, request, result_queue),
+            daemon=True,
+        )
+        start_wall = time.time()
+        process.start()
+        timed_out = False
+        terminated = False
+        message: Optional[Dict[str, Any]] = None
+        try:
+            message = result_queue.get(timeout=timeout_s)
+        except QueueEmpty:
+            timed_out = True
+        finally:
+            if timed_out and process.is_alive():
+                process.terminate()
+                terminated = True
+            process.join()
+            exit_code = process.exitcode
+            result_queue.close()
+            result_queue.join_thread()
+        elapsed = time.time() - start_wall
+        if timed_out and not terminated:
+            timed_out = False
+            if message is None:
+                message = {
+                    "status": "error",
+                    "error_type": "PlannerExited",
+                    "error_msg": f"planner process exited (code={exit_code}) before sending a result",
+                }
+        if timed_out:
+            logger.warning(
+                "Planner '%s' timed out after %.2fs", self.planner_type, timeout_s
+            )
+            return PlannerResult(
+                solution=None,
+                cost=None,
+                runtime_s=timeout_s,
+                meta={"planner": self.planner_type, "status": "timeout"},
+            )
+        if message is None:
+            meta = {
+                "planner": self.planner_type,
+                "status": "error",
+                "error": "planner process exited without result",
+            }
+            return PlannerResult(solution=None, cost=None, runtime_s=elapsed, meta=meta)
+        if message.get("status") == "ok":
+            return message["result"]
+        error_meta = {
+            "planner": self.planner_type,
+            "status": "error",
+            "error": message.get("error_msg"),
+            "exception": message.get("error_type"),
+        }
+        logger.warning(
+            "Planner '%s' failed in subprocess: %s",
+            self.planner_type,
+            error_meta.get("error"),
+        )
+        return PlannerResult(solution=None, cost=None, runtime_s=elapsed, meta=error_meta)

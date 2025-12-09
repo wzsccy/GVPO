@@ -3098,7 +3098,7 @@ class RLAllocator:
         self,
         *policy_args,
         algo_type: str = "gvpo",
-        planner_type: str = "lacam",
+        planner_type: str = PlannerFactory.default(),
         planner_kwargs: Optional[Dict[str, Any]] = None,
         **policy_kwargs,
     ):

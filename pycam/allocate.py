@@ -404,91 +404,51 @@ class Allocate():
         # print("任务集:",self.task_dict)
     # 为权重矩阵根据元素类型添加权值
     def weight_value(self,row,line):
-        value = 0
-        agent_num,task_num=len(self.agent_dict),len(self.task_dict) # 8
+        value = 0.0
+        agent_num, task_num = len(self.agent_dict), len(self.task_dict)
 
         # 权重类型1：代理——代理
-        if (row >= 0 and row < agent_num) and (line >= 0 and line < agent_num) : value=0
+        if 0 <= row < agent_num and 0 <= line < agent_num:
+            return 0.0
+
+        # 简单的曼哈顿距离函数（在当前网格上近似路径代价）
+        def manhattan(p, q):
+            return abs(p[0] - q[0]) + abs(p[1] - q[1])
+
         # 权重类型2：代理——任务点
-        if (row >= 0 and row < agent_num) and (line >= agent_num and line < (agent_num+task_num)):
-            agent_index=row
-            task_index=line-agent_num
-            width,height=self.dimension[0],self.dimension[1]
-            start,task,goal,r_time=(
-                self.agent_dict[agent_index],self.task_dict[task_index][0],self.task_dict[task_index][1],self.task_dict[task_index][2])
-            wall=self.obstacles
-            "A*"
-            # astar1=Astar(width,height,start,task,goal,r_time,wall)
-            # value=astar1.cost
+        if 0 <= row < agent_num and agent_num <= line < agent_num + task_num:
+            agent_index = row
+            task_index = line - agent_num
+            start = self.agent_dict[agent_index]
+            pickup = self.task_dict[task_index][0]
+            dropoff = self.task_dict[task_index][1]
+            r_time = self.task_dict[task_index][2]
 
-            "Lacam*"
-            "起点——取货"
-            lac_0 = LaCAM()
-            start=[start]
-            task=[task]
-            start=Config(start)
-            task=Config(task)
-            solution_0=lac_0.solve(self.lacam_grid,start,task,0,None,True,0,1,0)
-            positions_list_0 = [config.positions[0] for config in solution_0]
-            value_0 = lac_0.calculate_euclidean_distance_sum(positions_list_0)
-            if r_time >= value: # 释放时间
-                value_0=r_time
-
-            "取货-交货"
-            lac_1 = LaCAM()
-            goal = [goal]
-            goal = Config(goal)
-            # solution = lac_0.solve(self.lacam_grid, task, goal, 0, None, True, 0, 1, 0)
-            solution_1 = lac_0.solve(self.lacam_grid, task, goal)
-            positions_list_1 = [config.positions[0] for config in solution_1]
-            value_1 = lac_1.calculate_euclidean_distance_sum(positions_list_1)
-
-            value = value_0 + value_1 # 合并两段
-            # print(value)
-
+            travel = manhattan(start, pickup) + manhattan(pickup, dropoff)
+            value = float(max(travel, r_time))
 
         # 权重类型3：任务点——代理
-        if (row >= agent_num and row < agent_num+task_num) and (line >=0 and line <agent_num):
-            value=0
+        elif agent_num <= row < agent_num + task_num and 0 <= line < agent_num:
+            value = 0.0
+
         # 权重类型4：已完成任务点——任务点
-        if (row >= agent_num and row < agent_num+task_num) and (line >= agent_num and line < (agent_num+task_num)):
-            first_task_index=row-agent_num
-            second_task_index=line-agent_num
+        elif agent_num <= row < agent_num + task_num and agent_num <= line < agent_num + task_num:
+            first_task_index = row - agent_num
+            second_task_index = line - agent_num
 
-            width, height = self.dimension[0], self.dimension[1]
-            start, task, goal,r_time=(
-                self.task_dict[first_task_index][1],self.task_dict[second_task_index][0],self.task_dict[second_task_index][1],self.task_dict[second_task_index][2])
-            wall=self.obstacles
-            "A*"
-            # astar2=Astar(width,height,start,task,goal,r_time,wall)
-            # value=astar2.cost
+            # 如果是同一个任务，成本视为 0
+            if first_task_index == second_task_index:
+                return 0.0
 
-            "Lacam*"
-            "起点——取货"
-            lac_2 = LaCAM()
-            start = [start]
-            task = [task]
-            start = Config(start)
-            task = Config(task)
-            solution_2 = lac_2.solve(self.lacam_grid, start, task, 0, None, True, 0, 1, 0)
-            positions_list_2 = [config.positions[0] for config in solution_2]
-            value_2 = lac_2.calculate_euclidean_distance_sum(positions_list_2)
-            if r_time >= value:  # 释放时间
-                value_2 = r_time
+            start = self.task_dict[first_task_index][1]
+            pickup = self.task_dict[second_task_index][0]
+            dropoff = self.task_dict[second_task_index][1]
+            r_time = self.task_dict[second_task_index][2]
 
-            "取货-交货"
-            lac_3 = LaCAM()
-            goal = [goal]
-            goal = Config(goal)
-            solution_3 = lac_3.solve(self.lacam_grid, task, goal)
-            positions_list_3 = [config.positions[0] for config in solution_3]
-            value_3 = lac_3.calculate_euclidean_distance_sum(positions_list_3)
-            value = value_2 + value_3  # 合并两段
+            travel = manhattan(start, pickup) + manhattan(pickup, dropoff)
+            value = float(max(travel, r_time))
 
-
-            # 如果任务点相同
-            if first_task_index == second_task_index: value=0
-        return value
+        return float(value)
     # 由完整配对序列返回出总成本
     def get_row_line(self,fe):
         test_cost=0

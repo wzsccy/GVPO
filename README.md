@@ -60,6 +60,10 @@ When you need just a suboptimal solution, try:
 poetry run python app.py -m assets/tunnel.map -i assets/tunnel.scen -N 2 --no-flg_star
 ```
 
+## Planner Selection
+
+`PlannerFactory` now defaults to the LNS2 backend so any CLI that accepts `--planner` (for example `app_test_fast_gap.py`) will run LNS2 unless specified otherwise. Pass `--planner lacam` or set `planner_type="lacam"` when instantiating `RLAllocator` if you need the historical LaCAM behavior.
+
 ### Jupyter Lab
 
 Jupyter Lab is also available.

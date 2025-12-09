@@ -101,12 +101,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--generations", type=int, default=6, help="Population size for GRPO/GVPO sampling")
     parser.add_argument("--seed", type=int, default=0, help="Global random seed")
     parser.add_argument("--log-interval", type=int, default=1, help="Episode logging frequency")
+    default_planner = PlannerFactory.default()
     parser.add_argument(
         "--planner",
         type=str,
         choices=PlannerFactory.choices(),
-        default="lacam",
-        help="Planner backend for MAPF solving (default: lacam)",
+        default=default_planner,
+        help=f"Planner backend for MAPF solving (default: {default_planner})",
     )
     parser.add_argument(
         "--planner-time-limit-ms",

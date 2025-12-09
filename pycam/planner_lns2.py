@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from loguru import logger
 
@@ -53,14 +53,19 @@ class LNS2Planner(BasePlanner):
         goals_xy = _config_to_xy_list(request.goals)
         if not starts_xy or not goals_xy:
             logger.warning("LNS2 planner received empty starts/goals.")
-            return PlannerResult(solution=None, cost=None, runtime_s=0.0, meta={"planner": self.name, "status": "empty"})
+            return PlannerResult(
+                solution=None,
+                cost=None,
+                runtime_s=0.0,
+                meta={"planner": self.name, "status": "failed"},
+            )
 
         num_agents = min(len(starts_xy), len(goals_xy))
         starts_xy = starts_xy[:num_agents]
         goals_xy = goals_xy[:num_agents]
 
         start_time = request.effective_start_time()
-        time_limit_s = None
+        time_limit_s: Optional[float] = None
         if request.time_limit_ms is not None:
             time_limit_s = max(0.0, float(request.time_limit_ms) / 1000.0)
         try:
@@ -75,7 +80,7 @@ class LNS2Planner(BasePlanner):
             )
         except TimeoutError:
             runtime = time.time() - start_time
-            meta = {"planner": self.name, "status": "timeout"}
+            meta = {"planner": self.name, "status": "over_time"}
             logger.warning(
                 "LNS2 planner exceeded wall-clock budget (%.2fs)", time_limit_s or 0.0
             )
